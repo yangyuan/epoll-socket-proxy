@@ -11,6 +11,7 @@
 #include <errno.h>
 #include <sys/epoll.h>
 #include <fcntl.h>
+#include <signal.h>
 
 #define PACKET_BUFFER_SIZE 8192
 #define EPOLL_BUFFER_SIZE 256
@@ -29,8 +30,10 @@ public:
 	StreamSocketProxy() {}
 	~StreamSocketProxy() {}
 	
-	bool init(const char * src_host, unsigned int src_port, const char * tar_host, unsigned int tar_port);
+	bool initialize(const char * src_host, unsigned int src_port, const char * tar_host, unsigned int tar_port);
 	void serve();
+	void terminate();
+	static void signal(int sig);
 private:
 	struct sockaddr_in src_addr;
 	struct sockaddr_in tar_addr;
@@ -38,6 +41,8 @@ private:
 	int sockfd;
 	int epollfd;
 	std::map <int, LINK*> links;
+	
+	static int signo;
 	
 	void on_link  (int fd);
 	void on_break (int fd);
@@ -52,7 +57,7 @@ private:
 	static int do_tcp_recv (LINK * link, int fd);
 };
 
-bool StreamSocketProxy::init(const char * src_host, unsigned int src_port, const char * tar_host, unsigned int tar_port) {
+bool StreamSocketProxy::initialize(const char * src_host, unsigned int src_port, const char * tar_host, unsigned int tar_port) {
 	// sockaddr
     src_addr.sin_family = AF_INET;
     src_addr.sin_port = htons(src_port);
@@ -85,10 +90,18 @@ void StreamSocketProxy::serve() {
 	struct epoll_event events[EPOLL_BUFFER_SIZE];
 	int count;
 	int i;
+	
 	while(true) {
 		count = epoll_wait(epollfd, events, EPOLL_BUFFER_SIZE, -1);
-		if( count < 0) {
-			if (errno == EINTR) continue;
+		if (count < 0) {
+			if (errno == EINTR) {
+				printf("\nSIGNAL: %d\n", signo);
+				terminate();
+				return;
+			} else {
+				printf("epoll error\n");
+				return;
+			}
 		}
 		for (i = 0; i < count; i ++) {
 			if ( events[i].data.fd == sockfd ) {
@@ -104,6 +117,28 @@ void StreamSocketProxy::serve() {
 		}
 	}
 }
+
+void StreamSocketProxy::terminate() {
+	close(sockfd);
+	close(epollfd);
+	
+	for (std::map<int, LINK*>::iterator it=links.begin(); it!= links.end(); it++) {
+		LINK * link = it->second;
+		close(link->src_fd);
+		close(link->tar_fd);
+		delete link;
+	}
+	links.empty();
+	
+	delete this;
+}
+
+void StreamSocketProxy::signal(int sig) {
+	signo = sig;
+	// INTR will be handled in serve: errno == EINTR
+}
+
+int StreamSocketProxy::signo;
 
 void StreamSocketProxy::on_link (int fd) {
 
@@ -302,8 +337,15 @@ int StreamSocketProxy::do_tcp_recv (LINK * link, int fd) {
 	return 1;
 }
 
+
+class SocketProxyManager {
+};
+
 int main (int argc, char *argv[]) {
 	StreamSocketProxy * sp = new StreamSocketProxy();
-	bool ret = sp->init(NULL, 8080, "127.0.0.1", 80);
+	bool ret = sp->initialize(NULL, 8080, "127.0.0.1", 80);
+	
+	signal (SIGINT, StreamSocketProxy::signal);
+	signal (SIGTERM, StreamSocketProxy::signal);
 	sp->serve();
 }
